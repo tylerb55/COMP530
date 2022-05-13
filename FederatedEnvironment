@@ -1,0 +1,606 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "name": "Untitled8.ipynb",
+      "provenance": [],
+      "authorship_tag": "ABX9TyOKhZIlKzhfAXrw4ROyr5Mx",
+      "include_colab_link": true
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "view-in-github",
+        "colab_type": "text"
+      },
+      "source": [
+        "<a href=\"https://colab.research.google.com/github/tylerb55/COMP530/blob/main/FederatedEnvironment\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Load the dataset into colab**"
+      ],
+      "metadata": {
+        "id": "SrO1mrHsQ68b"
+      }
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "I5A99dQenC2b"
+      },
+      "outputs": [],
+      "source": [
+        "! git clone https://github.com/tylerb55/COMP530.git"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "! pip install --upgrade tensorflow-federated==0.20.0"
+      ],
+      "metadata": {
+        "id": "JnNlX8v9nJsX"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Import Necessary Libraries**"
+      ],
+      "metadata": {
+        "id": "esT0FSCbn1k3"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import numpy as np\n",
+        "import collections\n",
+        "import matplotlib.image as img\n",
+        "import matplotlib.pyplot as plt\n",
+        "import tensorflow as tf\n",
+        "import tensorflow_federated as tff\n",
+        "import tensorflow_datasets as tfds\n",
+        "import nest_asyncio as na\n",
+        "import random "
+      ],
+      "metadata": {
+        "id": "saAeLPIGnJyO"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "NUM_CLIENTS=5 \n",
+        "NUM_EPOCHS=10\n",
+        "BATCH_SIZE=32\n",
+        "SHUFFLE_BUFFER=100\n",
+        "PREFETCH_BUFFER=10"
+      ],
+      "metadata": {
+        "id": "m1nzB_kJtWvd"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Load the dataset into the environment and make it a federated dataset**"
+      ],
+      "metadata": {
+        "id": "3gRB1c-rShCR"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def Train_and_Test_Set(directory_name):\n",
+        "  \"\"\"a function to load the images in a large directory into a tensorflow dataset object\n",
+        "  the data is split 80:20 in training:test. The dataset is shuffled before splitting\n",
+        "  and the images are formatted to 512x512 pixels (pixel values range from 0 to 255)\n",
+        "  Images are labelled 0,1 based on the folder they are in. Normalcases are 0 and \n",
+        "  cancercases are 1\"\"\"\n",
+        "  dataset_train=tf.keras.preprocessing.image_dataset_from_directory('/content/COMP530/'+directory_name,\n",
+        "                                                                    labels='inferred',\n",
+        "                                                                    label_mode='int',\n",
+        "                                                                    class_names=['NormalCases','cancercases'],\n",
+        "                                                                    color_mode='rgb',\n",
+        "                                                                    image_size=(512,512),\n",
+        "                                                                    shuffle=True,\n",
+        "                                                                    seed=305,\n",
+        "                                                                    validation_split=0.2,\n",
+        "                                                                    subset='training',\n",
+        "                                                                    batch_size=None\n",
+        "                                                                    )\n",
+        "  \n",
+        "  dataset_test=tf.keras.preprocessing.image_dataset_from_directory('/content/COMP530/'+directory_name,\n",
+        "                                                                    labels='inferred',\n",
+        "                                                                    label_mode='int',\n",
+        "                                                                    class_names=['NormalCases','cancercases'],\n",
+        "                                                                    color_mode='rgb',\n",
+        "                                                                    image_size=(512,512),\n",
+        "                                                                    shuffle=True,\n",
+        "                                                                    seed=305,\n",
+        "                                                                    validation_split=0.2,\n",
+        "                                                                    subset='validation',\n",
+        "                                                                    batch_size=None\n",
+        "                                                                    )\n",
+        "\n",
+        "  return dataset_train,dataset_test"
+      ],
+      "metadata": {
+        "id": "iywtvxgWnJ0-"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def federate_dataset(Dataset,clients):\n",
+        "  \"\"\"\n",
+        "  args:\n",
+        "  Dataset - the dataset object to be passed into the function and separated between the clients in the simulation\n",
+        "  clients - the number of clients for the dataset to have come from in the simulated environment\n",
+        "  return:\n",
+        "  dataset_by_client - the original dataset federated between the number of clients. \n",
+        "  each client is labelled by their client id, in a dictionary. each id points to an individual dataset object\n",
+        "  \"\"\"\n",
+        "  image_count=tf.data.experimental.cardinality(Dataset).numpy()\n",
+        "  image_per_set=int(np.floor(image_count/clients))\n",
+        "\n",
+        "  client_train_dataset=collections.OrderedDict()\n",
+        "  Dataset=tfds.as_numpy(Dataset)\n",
+        "  count=0\n",
+        "  client_num=1\n",
+        "  y=[]\n",
+        "  x=[]\n",
+        "  \"\"\"this code snippet assigns particular training examples to each client. In this example they have been evenly distributed\n",
+        "  hetrogeneity of federated data could be explored by randomly assigning a clients to each training example.\n",
+        "  This would result in some clients having more than enough training data locally and some  and some suffering from data\n",
+        "  paucity locally. \"\"\"\n",
+        "  for image in Dataset:\n",
+        "    count+=1\n",
+        "    y.append(image[1])\n",
+        "    x.append(image[0])\n",
+        "    if(count==image_per_set):\n",
+        "      x=np.asarray(x,dtype=np.float32)\n",
+        "      y=np.asarray(y,dtype=np.int32)\n",
+        "      data=collections.OrderedDict((('label', y), ('image', x)))\n",
+        "      client_train_dataset[\"client_\"+str(client_num)]=data\n",
+        "      count=0\n",
+        "      client_num+=1\n",
+        "      y=[]\n",
+        "      x=[]\n",
+        "\n",
+        "  federated_dataset=tff.simulation.datasets.TestClientData(client_train_dataset)\n",
+        "  return federated_dataset"
+      ],
+      "metadata": {
+        "id": "37i3yCalnJ4G"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def preprocess(dataset):\n",
+        "\n",
+        "  def format_batch(element):\n",
+        "    \"\"\"flatten the pixels in a batch and return the features as an 'OrderedDict'\"\"\"\n",
+        "    tf.image.per_image_standardization(element['image'])\n",
+        "    return collections.OrderedDict(\n",
+        "        x=tf.image.resize(element['image'],(224,224)),\n",
+        "        y=tf.reshape(element['label'],[-1,1])\n",
+        "    )\n",
+        "  return dataset.repeat(NUM_EPOCHS).shuffle(SHUFFLE_BUFFER, seed=1).batch(BATCH_SIZE).map(format_batch).prefetch(PREFETCH_BUFFER)"
+      ],
+      "metadata": {
+        "id": "d_yaRnnRsdyV"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "  data_augmentation = tf.keras.Sequential([\n",
+        "  tf.keras.layers.RandomFlip(\"horizontal_and_vertical\"),\n",
+        "  tf.keras.layers.RandomRotation(0.2),\n",
+        "  ])"
+      ],
+      "metadata": {
+        "id": "QB6B8v18LYE3"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def make_federated_data(client_data,client_ids,training):\n",
+        "  \"\"\" the federated dataset that can be passed into the federated environemt to train or test the network \"\"\"\n",
+        "  data_augmentation = tf.keras.Sequential([\n",
+        "  tf.keras.layers.RandomFlip(\"horizontal_and_vertical\"),\n",
+        "  tf.keras.layers.RandomRotation(0.2),\n",
+        "  ])\n",
+        "  if training:\n",
+        "    client_ids=random.sample(client_ids,random.randint(1,NUM_CLIENTS))\n",
+        "  return[\n",
+        "         preprocess(client_data.create_tf_dataset_for_client(x)).map(lambda x: (data_augmentation(x['x']),x['y']))\n",
+        "         for x in client_ids         \n",
+        "  ]"
+      ],
+      "metadata": {
+        "id": "uw8od7l3pfFm"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "\"\"\" the original dataset held in keras dataset objects \"\"\"\n",
+        "dataset_train, dataset_test=Train_and_Test_Set(\"Dataset1\")\n",
+        "\"\"\" the dataset split by the which client the data has come from \"\"\"\n",
+        "federated_train_dataset=federate_dataset(dataset_train,NUM_CLIENTS)\n",
+        "federated_test_dataset=federate_dataset(dataset_test,NUM_CLIENTS)\n",
+        "\"\"\" an example dataset for a single client used to get the input specification for the federated model \"\"\"\n",
+        "example_dataset = federated_train_dataset.create_tf_dataset_for_client(federated_train_dataset.client_ids[0])\n",
+        "preprocessed_example_dataset=preprocess(example_dataset)"
+      ],
+      "metadata": {
+        "id": "jRHseKmntCzt"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Load a model pretrained on the imagenet dataset as the CNN for the environment**"
+      ],
+      "metadata": {
+        "id": "XokSTwlDTiCv"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def ResNet_model():\n",
+        "  base_model=tf.keras.applications.ResNet50(weights='imagenet',input_shape=(224,224,3),include_top=False) # use resnet50 as the base for the tl model\n",
+        "  base_model.trainable = False # freeze the resnet50 layers\n",
+        "\n",
+        "  inputs = tf.keras.Input(shape=(224, 224, 3))\n",
+        "  x = base_model(inputs, training=False)# Convert features of shape `base_model.output_shape[1:]` to vectors\n",
+        "  x = tf.keras.layers.GlobalAveragePooling2D()(x)\n",
+        "  x = tf.keras.layers.Dropout(0.2)(x)\n",
+        "  x = tf.keras.layers.Dense(64,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(32,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(16,activation='relu')(x)\n",
+        "  outputs = tf.keras.layers.Dense(1,activation='sigmoid')(x)# A Dense classifier with a single unit (binary classification)\n",
+        "  model = tf.keras.Model(inputs, outputs)\n",
+        "  return model\n"
+      ],
+      "metadata": {
+        "id": "ELou-iMrkrHA"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def MobileNet_model():\n",
+        "  base_model=tf.keras.applications.MobileNetV2(weights='imagenet',input_shape=(224,224,3),include_top=False) # use mobilenetv2 as the base for the tl model\n",
+        "  base_model.trainable = False # freeze the mobilenetv2 layers\n",
+        "\n",
+        "  inputs = tf.keras.Input(shape=(224, 224, 3))\n",
+        "  x = base_model(inputs, training=False)# Convert features of shape `base_model.output_shape[1:]` to vectors\n",
+        "  x = tf.keras.layers.GlobalAveragePooling2D()(x)\n",
+        "  x = tf.keras.layers.Dropout(0.2)(x)\n",
+        "  x = tf.keras.layers.Dense(64,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(32,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(16,activation='relu')(x)\n",
+        "  outputs = tf.keras.layers.Dense(1,activation='sigmoid')(x)# A Dense classifier with a single unit (binary classification)\n",
+        "  model = tf.keras.Model(inputs, outputs)\n",
+        "  return model"
+      ],
+      "metadata": {
+        "id": "K3unZ6-fUXbR"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def DenseNet_model():\n",
+        "  base_model=tf.keras.applications.DenseNet121(weights='imagenet',input_shape=(224,224,3),include_top=False) # use densenet121 as the base for the tl model\n",
+        "  base_model.trainable = False # freeze the densenet121 layers\n",
+        "\n",
+        "  inputs = tf.keras.Input(shape=(224, 224, 3))\n",
+        "  x = base_model(inputs, training=False)# Convert features of shape `base_model.output_shape[1:]` to vectors\n",
+        "  x = tf.keras.layers.GlobalAveragePooling2D()(x)\n",
+        "  x = tf.keras.layers.Dropout(0.2)(x)\n",
+        "  x = tf.keras.layers.Dense(64,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(32,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(16,activation='relu')(x)\n",
+        "  outputs = tf.keras.layers.Dense(1,activation='sigmoid')(x)# A Dense classifier with a single unit (binary classification)\n",
+        "  model = tf.keras.Model(inputs, outputs)\n",
+        "  return model"
+      ],
+      "metadata": {
+        "id": "iA1WX4MWk0-B"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def VGG_model():\n",
+        "  base_model=tf.keras.applications.VGG16(weights='imagenet',input_shape=(224,224,3),include_top=False) # use vgg16 as the base for the tl model\n",
+        "  base_model.trainable = False # freeze the vgg16 layers\n",
+        "\n",
+        "  inputs = tf.keras.Input(shape=(224, 224, 3))\n",
+        "  x = base_model(inputs, training=False)# Convert features of shape `base_model.output_shape[1:]` to vectors\n",
+        "  x = tf.keras.layers.GlobalAveragePooling2D()(x)\n",
+        "  x = tf.keras.layers.Dropout(0.2)(x)\n",
+        "  x = tf.keras.layers.Dense(64,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(32,activation='relu')(x)\n",
+        "  x = tf.keras.layers.Dense(16,activation='relu')(x)\n",
+        "  outputs = tf.keras.layers.Dense(1,activation='sigmoid')(x)# A Dense classifier with a single unit (binary classification)\n",
+        "  model = tf.keras.Model(inputs, outputs)\n",
+        "  return model"
+      ],
+      "metadata": {
+        "id": "ntRbyPe_lEy4"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#resnet=ResNet_model()\n",
+        "#resnet.summary()\n",
+        "#mobilenet=MobileNet_model()\n",
+        "#mobilenet.summary()\n",
+        "#densenet=DenseNet_model()\n",
+        "#densenet.summary()\n",
+        "vgg=VGG_model()\n",
+        "vgg.summary()"
+      ],
+      "metadata": {
+        "id": "LpTaLiX9lGmZ"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Create the federated environment based on the pretrained model** "
+      ],
+      "metadata": {
+        "id": "PiwJ-W_sQOgC"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def federated_model():\n",
+        "  resnet=ResNet_model()\n",
+        "  mobilenet=MobileNet_model()\n",
+        "  densenet=DenseNet_model()\n",
+        "  vgg=VGG_model()\n",
+        "  return tff.learning.from_keras_model(\n",
+        "      #resnet,\n",
+        "      #mobilenet,\n",
+        "      densenet,\n",
+        "      #vgg,\n",
+        "      input_spec=preprocessed_example_dataset.element_spec,\n",
+        "      loss=tf.keras.losses.BinaryCrossentropy(),\n",
+        "      metrics=[tf.keras.metrics.BinaryAccuracy(),tf.keras.metrics.Recall(),tf.keras.metrics.Precision(),tf.keras.metrics.TruePositives(),tf.keras.metrics.TrueNegatives(),tf.keras.metrics.FalsePositives(),tf.keras.metrics.FalseNegatives()])"
+      ],
+      "metadata": {
+        "id": "2xrCU3_8pkyF"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "iterative_process = tff.learning.build_federated_averaging_process(\n",
+        "    federated_model,\n",
+        "    client_optimizer_fn=lambda: tf.keras.optimizers.Adam(learning_rate=0.0001),\n",
+        "    server_optimizer_fn=lambda: tf.keras.optimizers.Adam(learning_rate=0.001))"
+      ],
+      "metadata": {
+        "id": "mKK4uNJfppJm"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "%load_ext tensorboard"
+      ],
+      "metadata": {
+        "id": "ltuUUcGtlrGT"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "%reload_ext tensorboard"
+      ],
+      "metadata": {
+        "id": "AxXdwfJ4AseC"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "na.apply()\n",
+        "logdir = \"/tmp/logs/scalars/training/\"\n",
+        "summary_writer = tf.summary.create_file_writer(logdir)\n",
+        "state=iterative_process.initialize()\n",
+        "NUM_ROUNDS=101\n",
+        "with summary_writer.as_default():\n",
+        "  for round_num in range(1, NUM_ROUNDS):\n",
+        "    federated_train_data = make_federated_data(federated_train_dataset, federated_train_dataset.client_ids,training=True)\n",
+        "    state, metrics = iterative_process.next(state, federated_train_data)\n",
+        "    train=metrics['train']\n",
+        "    specificity=train['true_negatives']/(train['true_negatives']+train['false_positives'])\n",
+        "    sensitivity=train['recall']\n",
+        "    f2_score=(5*train['precision']*train['recall'])/(4*train['precision']+train['recall'])\n",
+        "    tf.summary.scalar('Binary Accuracy', train['binary_accuracy'], step=round_num)\n",
+        "    tf.summary.scalar('Specificity', specificity, step=round_num)\n",
+        "    tf.summary.scalar('Sensitivity', sensitivity, step=round_num)\n",
+        "    tf.summary.scalar('F2-Score', f2_score, step=round_num)\n",
+        "    tf.summary.scalar('Loss', train['loss'], step=round_num)\n",
+        "    print('round {:2d}, metrics={}'.format(round_num, metrics['train']),'(Specificity,',specificity,') (Sensitivity,',sensitivity,') (F2 Score',f2_score,')')\n",
+        "    #for name, value in metrics['train'].items():\n",
+        "        #tf.summary.scalar(name, value, step=round_num)\n",
+        "        #if(name=='recall'):\n",
+        "        #  break"
+      ],
+      "metadata": {
+        "id": "ngNxWFbgps5F"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Output the results to graph visualisations**"
+      ],
+      "metadata": {
+        "id": "xl0FFZjXLp8J"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "!ls {logdir}\n",
+        "%tensorboard --logdir {logdir} --port=0"
+      ],
+      "metadata": {
+        "id": "I3zdVACwlCUf"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# **Evaluation on the test set**"
+      ],
+      "metadata": {
+        "id": "goO0YmzVtaAM"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "evaluation=tff.learning.build_federated_evaluation(federated_model)"
+      ],
+      "metadata": {
+        "id": "Ak7ZRu2dBByK"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "federated_test_data = make_federated_data(federated_test_dataset, federated_test_dataset.client_ids,training=False)"
+      ],
+      "metadata": {
+        "id": "cWqmZZKCoDak"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "test_metrics = evaluation(state.model, federated_test_data)"
+      ],
+      "metadata": {
+        "id": "Coqmc64BBB9z"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "test=test_metrics['eval']\n",
+        "specificity=test['true_negatives']/(test['true_negatives']+test['false_positives'])\n",
+        "sensitivity=test['recall']\n",
+        "f_score=(5*test['precision']*test['recall'])/(4*test['precision']+test['recall'])\n",
+        "accuracy=test['binary_accuracy']\n",
+        "print('Evaluation Metrics: (Accuracy:)',accuracy,'(F2-Score)',f_score,'(Specificity:)',specificity,'(Sensitivity:)',sensitivity)"
+      ],
+      "metadata": {
+        "id": "4wE6RZ-HtkNk"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "print(test)"
+      ],
+      "metadata": {
+        "id": "lwrhS97jX4f_"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# Uncomment and run this cell to remove old outputs from the directory so new results can be seen on tensorboard\n",
+        "\n",
+        "#!rm -R /tmp/logs/scalars/*"
+      ],
+      "metadata": {
+        "id": "NH-7zIZ1WIte"
+      },
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}
